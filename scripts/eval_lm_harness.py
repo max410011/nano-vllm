@@ -85,6 +85,11 @@ def main():
         default=768,
         help="xKV SVD rank for values"
     )
+    parser.add_argument(
+        "--xkv_paged_writeback",
+        action="store_true",
+        help="Enable paged writeback for xKV (write compressed KV to paged cache)"
+    )
     args = parser.parse_args()
 
     # Create xKV config if enabled
@@ -104,8 +109,10 @@ def main():
             group_size=args.xkv_group_size,
             rank_k=args.xkv_rank_k,
             rank_v=args.xkv_rank_v,
+            paged_writeback=args.xkv_paged_writeback,
         )
-        print(f"xKV enabled: {num_layers} layers, group_size={args.xkv_group_size}, rank_k={args.xkv_rank_k}, rank_v={args.xkv_rank_v}")
+        paged_str = ", paged_writeback=True" if args.xkv_paged_writeback else ""
+        print(f"xKV enabled: {num_layers} layers, group_size={args.xkv_group_size}, rank_k={args.xkv_rank_k}, rank_v={args.xkv_rank_v}{paged_str}")
 
     # Create nano-vllm model wrapper
     print(f"Loading model from: {args.model_path}")

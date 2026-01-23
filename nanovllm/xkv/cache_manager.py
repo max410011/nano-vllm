@@ -51,6 +51,9 @@ class xKVCacheManager:
         # Dict[layer_idx, (k_compressed, v_compressed)]
         self.compressed_kv_cache: Dict[int, Tuple[Tensor, Tensor]] = {}
 
+        # Registered attention modules for paged writeback
+        self.attention_modules: Dict[int, "Attention"] = {}
+
     @property
     def enabled(self) -> bool:
         """Check if xKV compression is enabled."""
@@ -228,4 +231,56 @@ class xKVCacheManager:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def register_attention(self, layer_idx: int, attention: "Attention"):
+        """
+        Register an Attention module for paged writeback.
+
+        Args:
+            layer_idx: Layer index
+            attention: Attention module with KV cache
+        """
+        self.attention_modules[layer_idx] = attention
+
+    def writeback_compressed_to_paged_cache(
+        self,
+        last_layer_idx: int,
+        slot_mapping: Tensor,
+    ):
+        """
+        Write compressed KVs for a group to paged cache.
+
+        Args:
+            last_layer_idx: Last layer index of the group (triggers writeback)
+            slot_mapping: Slot mapping for paged cache
+        """
+        group = self.config.get_group_for_layer(last_layer_idx)
+        if group is None:
+            return
+
+        layer_indices = group.layers
+
+        for layer_idx in layer_indices:
+            # Get compressed KV
+            comp_kv = self.get_compressed_kv(layer_idx)
+            if comp_kv is None:
+                continue
+
+            comp_k, comp_v = comp_kv
+
+            # Get attention module for this layer
+            attn = self.attention_modules.get(layer_idx)
+            if attn is None:
+                raise RuntimeError(
+                    f"Attention module for layer {layer_idx} not registered. "
+                    "Call register_attention() during model initialization."
+                )
+
+            # Write to paged cache
+            attn.write_kvcache(comp_k, comp_v, slot_mapping)
+
+        # Clear compressed cache for these layers
+        for layer_idx in layer_indices:
+            if layer_idx in self.compressed_kv_cache:
+                del self.compressed_kv_cache[layer_idx]
 

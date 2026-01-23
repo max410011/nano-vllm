@@ -38,6 +38,10 @@ class ModelRunner:
         if config.enable_xkv and config.xkv_config is not None:
             num_kv_heads = hf_config.num_key_value_heads // self.world_size
             self.xkv_manager = xKVCacheManager(config.xkv_config, num_kv_heads)
+            # Register attention modules for paged writeback (before warmup)
+            # Note: write_kvcache is a no-op until k_cache/v_cache are allocated
+            if config.xkv_config.paged_writeback:
+                self._register_attention_modules()
 
         self.warmup_model()
         self.allocate_kv_cache()
@@ -125,6 +129,16 @@ class ModelRunner:
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+
+    def _register_attention_modules(self):
+        """Register attention modules with xKV manager for paged writeback."""
+        if self.xkv_manager is None:
+            return
+        # model.model.layers[i].self_attn.attn is the Attention module
+        for i, layer in enumerate(self.model.model.layers):
+            if self.xkv_manager.is_layer_in_group(i):
+                attn = layer.self_attn.attn
+                self.xkv_manager.register_attention(i, attn)
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)

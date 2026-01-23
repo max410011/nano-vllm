@@ -70,6 +70,19 @@ class Attention(nn.Module):
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
+                                        cache_seqlens=context.context_lens, block_table=context.block_tables,
                                         softmax_scale=self.scale, causal=True)
         return o
+
+    def write_kvcache(self, k: torch.Tensor, v: torch.Tensor, slot_mapping: torch.Tensor):
+        """
+        Write compressed KV to paged cache (used by xKV paged writeback).
+
+        Args:
+            k: Key tensor (with RoPE applied), shape (N, num_kv_heads, head_dim)
+            v: Value tensor, shape (N, num_kv_heads, head_dim)
+            slot_mapping: Slot mapping for paged cache
+        """
+        k_cache, v_cache = self.k_cache, self.v_cache
+        if k_cache.numel() and v_cache.numel():
+            store_kvcache(k, v, k_cache, v_cache, slot_mapping)

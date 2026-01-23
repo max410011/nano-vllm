@@ -103,6 +103,12 @@ class Qwen3Attention(nn.Module):
                 for lyr_idx, (comp_k, comp_v) in compressed_kv.items():
                     xkv_manager.store_compressed_kv(lyr_idx, comp_k, comp_v)
 
+                # Writeback to paged cache if enabled
+                if xkv_manager.config.paged_writeback:
+                    xkv_manager.writeback_compressed_to_paged_cache(
+                        layer_idx, context.slot_mapping
+                    )
+
             # Use compressed K, V if available
             comp_kv = xkv_manager.get_compressed_kv(layer_idx)
             if comp_kv is not None:
