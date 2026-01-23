@@ -90,6 +90,30 @@ def main():
         action="store_true",
         help="Enable paged writeback for xKV (write compressed KV to paged cache)"
     )
+    # Sparse attention parameters (Step 4)
+    parser.add_argument(
+        "--xkv_enable_sparse",
+        action="store_true",
+        help="Enable sparse attention (ShadowKV-style)"
+    )
+    parser.add_argument(
+        "--xkv_chunk_size",
+        type=int,
+        default=8,
+        help="Chunk size for sparse attention"
+    )
+    parser.add_argument(
+        "--xkv_sparse_budget",
+        type=int,
+        default=256,
+        help="Number of chunks to select for sparse attention"
+    )
+    parser.add_argument(
+        "--xkv_num_outliers",
+        type=int,
+        default=48,
+        help="Number of outlier chunks to keep as static cache"
+    )
     args = parser.parse_args()
 
     # Create xKV config if enabled
@@ -110,9 +134,14 @@ def main():
             rank_k=args.xkv_rank_k,
             rank_v=args.xkv_rank_v,
             paged_writeback=args.xkv_paged_writeback,
+            enable_sparse=args.xkv_enable_sparse,
+            chunk_size=args.xkv_chunk_size,
+            sparse_budget=args.xkv_sparse_budget,
+            num_outliers=args.xkv_num_outliers,
         )
         paged_str = ", paged_writeback=True" if args.xkv_paged_writeback else ""
-        print(f"xKV enabled: {num_layers} layers, group_size={args.xkv_group_size}, rank_k={args.xkv_rank_k}, rank_v={args.xkv_rank_v}{paged_str}")
+        sparse_str = f", sparse(chunk={args.xkv_chunk_size}, budget={args.xkv_sparse_budget}, outliers={args.xkv_num_outliers})" if args.xkv_enable_sparse else ""
+        print(f"xKV enabled: {num_layers} layers, group_size={args.xkv_group_size}, rank_k={args.xkv_rank_k}, rank_v={args.xkv_rank_v}{paged_str}{sparse_str}")
 
     # Create nano-vllm model wrapper
     print(f"Loading model from: {args.model_path}")

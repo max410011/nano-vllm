@@ -115,6 +115,11 @@ class Qwen3Attention(nn.Module):
                 k, v = comp_kv
 
         q, k = self.rotary_emb(positions, q, k)
+
+        # Compute sparse landmarks after RoPE (ShadowKV-style)
+        if xkv_manager is not None and xkv_manager.config.enable_sparse and context.is_prefill:
+            xkv_manager.compute_sparse_landmarks(self.layer_idx, k, v)
+
         o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))
         return output

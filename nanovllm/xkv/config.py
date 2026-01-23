@@ -37,10 +37,16 @@ class LayerGroup:
 class xKVConfig:
     """
     Configuration for xKV compression.
-    
+
     Supports two compression methods:
     - 'svd': Uses SVD decomposition with rank truncation
     - 'slerp': Uses SLERP interpolation (only for group_size=2)
+
+    Supports sparse attention (ShadowKV-style) for further memory savings:
+    - enable_sparse: Enable chunk-based sparse KV selection
+    - chunk_size: Tokens per chunk for landmark computation
+    - sparse_budget: Number of chunks to select during decode
+    - num_outliers: Number of outlier chunks to keep as static cache
     """
     num_layers: Optional[int] = None
     layer_merge_impl: str = "svd"
@@ -62,6 +68,12 @@ class xKVConfig:
 
     # Paged attention writeback (for Step 3)
     paged_writeback: bool = False
+
+    # Sparse attention settings (for Step 4 - ShadowKV-style)
+    enable_sparse: bool = False
+    chunk_size: int = 8  # Tokens per chunk
+    sparse_budget: int = 256  # Number of chunks to select
+    num_outliers: int = 48  # Number of outlier chunks to keep
 
     # Internal: layer -> group mapping
     _layer_map: Dict[int, LayerGroup] = field(init=False, default_factory=dict)
@@ -138,6 +150,11 @@ def generate_consecutive_xKV_config(
     merge_key: bool = True,
     merge_value: bool = True,
     paged_writeback: bool = False,
+    # Sparse attention parameters (Step 4)
+    enable_sparse: bool = False,
+    chunk_size: int = 8,
+    sparse_budget: int = 256,
+    num_outliers: int = 48,
 ) -> xKVConfig:
     """Quickly build a xKVConfig with consecutive-layer groups."""
     if end_layer == -1:
@@ -157,5 +174,9 @@ def generate_consecutive_xKV_config(
         merge_value=merge_value,
         layer_groups=layer_groups,
         paged_writeback=paged_writeback,
+        enable_sparse=enable_sparse,
+        chunk_size=chunk_size,
+        sparse_budget=sparse_budget,
+        num_outliers=num_outliers,
     )
 

@@ -5,6 +5,7 @@ This module manages the KV cache compression process during inference:
 - Stores temporary pre-RoPE KV cache during prefill
 - Triggers compression at the end of each layer group
 - Returns compressed KV for attention computation
+- Supports sparse attention (ShadowKV-style) for further memory savings
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from torch import Tensor
 
 from nanovllm.xkv.config import xKVConfig, LayerGroup
 from nanovllm.xkv.compressor import fake_svd, fake_minicache_merge
+from nanovllm.xkv.sparse_selector import SparseSelector
 
 if TYPE_CHECKING:
     from nanovllm.layers.attention import Attention
@@ -53,6 +55,18 @@ class xKVCacheManager:
 
         # Registered attention modules for paged writeback
         self.attention_modules: Dict[int, "Attention"] = {}
+
+        # Sparse selectors for each layer (ShadowKV-style)
+        # Dict[layer_idx, SparseSelector]
+        self.sparse_selectors: Dict[int, SparseSelector] = {}
+        if config.enable_sparse:
+            for grp in config.layer_groups:
+                for layer_idx in grp.layers:
+                    self.sparse_selectors[layer_idx] = SparseSelector(
+                        chunk_size=config.chunk_size,
+                        sparse_budget=config.sparse_budget,
+                        num_outliers=config.num_outliers,
+                    )
 
     @property
     def enabled(self) -> bool:
@@ -224,14 +238,6 @@ class xKVCacheManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def clear_all(self):
-        """Clear all caches."""
-        self.temp_kv_cache.clear()
-        self.compressed_kv_cache.clear()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
     def register_attention(self, layer_idx: int, attention: "Attention"):
         """
         Register an Attention module for paged writeback.
@@ -283,4 +289,67 @@ class xKVCacheManager:
         for layer_idx in layer_indices:
             if layer_idx in self.compressed_kv_cache:
                 del self.compressed_kv_cache[layer_idx]
+
+    def compute_sparse_landmarks(
+        self,
+        layer_idx: int,
+        k_post_rope: Tensor,
+        v: Tensor,
+    ) -> None:
+        """
+        Compute sparse landmarks and outliers for a layer (ShadowKV-style).
+
+        This should be called during prefill after RoPE is applied.
+
+        Args:
+            layer_idx: Layer index
+            k_post_rope: Post-RoPE key cache, shape (N, num_kv_heads, head_dim)
+            v: Value cache, shape (N, num_kv_heads, head_dim)
+        """
+        if not self.config.enable_sparse:
+            return
+        if layer_idx not in self.sparse_selectors:
+            return
+
+        selector = self.sparse_selectors[layer_idx]
+        selector.compute_landmarks_and_outliers(k_post_rope, v)
+
+    def get_sparse_selector(self, layer_idx: int) -> Optional[SparseSelector]:
+        """Get sparse selector for a layer."""
+        return self.sparse_selectors.get(layer_idx)
+
+    def get_sparse_stats(self) -> Dict[str, any]:
+        """Get statistics about sparse selection across all layers."""
+        stats = {
+            "enabled": self.config.enable_sparse,
+            "chunk_size": self.config.chunk_size,
+            "sparse_budget": self.config.sparse_budget,
+            "num_outliers": self.config.num_outliers,
+            "layers_with_landmarks": 0,
+            "total_outlier_tokens": 0,
+        }
+
+        if not self.config.enable_sparse:
+            return stats
+
+        for layer_idx, selector in self.sparse_selectors.items():
+            if selector.landmarks is not None:
+                stats["layers_with_landmarks"] += 1
+                stats["total_outlier_tokens"] += selector.get_num_outlier_tokens()
+
+        return stats
+
+    def clear_sparse_selectors(self) -> None:
+        """Clear all sparse selectors."""
+        for selector in self.sparse_selectors.values():
+            selector.clear()
+
+    def clear_all(self):
+        """Clear all caches including sparse selectors."""
+        self.temp_kv_cache.clear()
+        self.compressed_kv_cache.clear()
+        self.clear_sparse_selectors()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
