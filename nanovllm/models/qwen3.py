@@ -24,6 +24,7 @@ class Qwen3Attention(nn.Module):
         qkv_bias: bool = False,
         rope_theta: float = 10000,
         rope_scaling: tuple | None = None,
+        layer_idx: int | None = None,
     ) -> None:
         super().__init__()
         tp_size = dist.get_world_size()
@@ -38,6 +39,7 @@ class Qwen3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
         self.qkv_bias = qkv_bias
+        self.layer_idx = layer_idx
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -72,7 +74,10 @@ class Qwen3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        xkv_manager: "xKVCacheManager | None" = None,
     ) -> torch.Tensor:
+        from nanovllm.utils.context import get_context
+
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.view(-1, self.num_heads, self.head_dim)
@@ -81,6 +86,28 @@ class Qwen3Attention(nn.Module):
         if not self.qkv_bias:
             q = self.q_norm(q)
             k = self.k_norm(k)
+
+        # xKV compression handling (only during prefill)
+        context = get_context()
+        if xkv_manager is not None and xkv_manager.enabled and context.is_prefill:
+            layer_idx = self.layer_idx
+
+            # Store pre-RoPE K, V for compression
+            if xkv_manager.should_store_temp(layer_idx):
+                xkv_manager.store_temp_kv(layer_idx, k, v)
+
+            # At the last layer of a group, trigger compression
+            if xkv_manager.should_compress(layer_idx):
+                compressed_kv = xkv_manager.compress_group(layer_idx)
+                # Store compressed KV for all layers in the group
+                for lyr_idx, (comp_k, comp_v) in compressed_kv.items():
+                    xkv_manager.store_compressed_kv(lyr_idx, comp_k, comp_v)
+
+            # Use compressed K, V if available
+            comp_kv = xkv_manager.get_compressed_kv(layer_idx)
+            if comp_kv is not None:
+                k, v = comp_kv
+
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))
@@ -121,8 +148,10 @@ class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen3Config,
+        layer_idx: int,
     ) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.self_attn = Qwen3Attention(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -133,6 +162,7 @@ class Qwen3DecoderLayer(nn.Module):
             head_dim=getattr(config, 'head_dim', None),
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
+            layer_idx=layer_idx,
         )
         self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
@@ -147,12 +177,13 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        xkv_manager: "xKVCacheManager | None" = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions, hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states, xkv_manager)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -166,18 +197,22 @@ class Qwen3Model(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            Qwen3DecoderLayer(config, layer_idx=i)
+            for i in range(config.num_hidden_layers)
+        ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        xkv_manager: "xKVCacheManager | None" = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(positions, hidden_states, residual, xkv_manager)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -205,8 +240,9 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        xkv_manager: "xKVCacheManager | None" = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions)
+        return self.model(input_ids, positions, xkv_manager)
 
     def compute_logits(
         self,

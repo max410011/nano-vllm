@@ -1,5 +1,6 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 from transformers import AutoConfig
 
 
@@ -17,6 +18,10 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
 
+    # xKV compression settings
+    enable_xkv: bool = False
+    xkv_config: Optional["xKVConfig"] = None  # type: ignore[name-defined]
+
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
@@ -24,3 +29,7 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         assert self.max_num_batched_tokens >= self.max_model_len
+
+        # Validate xKV config if enabled
+        if self.enable_xkv and self.xkv_config is None:
+            raise ValueError("xkv_config must be provided when enable_xkv is True")

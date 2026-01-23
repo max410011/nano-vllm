@@ -57,19 +57,64 @@ def main():
         help="Number of GPUs for tensor parallelism"
     )
     parser.add_argument(
-        "--output_path", 
-        type=str, 
-        default=None, 
+        "--output_path",
+        type=str,
+        default=None,
         help="Path to save results JSON"
     )
+    parser.add_argument(
+        "--enable_xkv",
+        action="store_true",
+        help="Enable xKV compression"
+    )
+    parser.add_argument(
+        "--xkv_group_size",
+        type=int,
+        default=2,
+        help="xKV layer group size"
+    )
+    parser.add_argument(
+        "--xkv_rank_k",
+        type=int,
+        default=256,
+        help="xKV SVD rank for keys"
+    )
+    parser.add_argument(
+        "--xkv_rank_v",
+        type=int,
+        default=768,
+        help="xKV SVD rank for values"
+    )
     args = parser.parse_args()
-    
+
+    # Create xKV config if enabled
+    xkv_config = None
+    if args.enable_xkv:
+        from nanovllm.xkv import generate_consecutive_xKV_config
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(args.model_path)
+        num_layers = hf_config.num_hidden_layers
+
+        xkv_config = generate_consecutive_xKV_config(
+            layer_merge_impl="svd",
+            start_layer=0,
+            end_layer=num_layers - 1,
+            num_layers=num_layers,
+            group_size=args.xkv_group_size,
+            rank_k=args.xkv_rank_k,
+            rank_v=args.xkv_rank_v,
+        )
+        print(f"xKV enabled: {num_layers} layers, group_size={args.xkv_group_size}, rank_k={args.xkv_rank_k}, rank_v={args.xkv_rank_v}")
+
     # Create nano-vllm model wrapper
     print(f"Loading model from: {args.model_path}")
     model = NanoVLLMHarness(
-        pretrained=args.model_path, 
+        pretrained=args.model_path,
         batch_size=args.batch_size,
         tensor_parallel_size=args.tensor_parallel_size,
+        enable_xkv=args.enable_xkv,
+        xkv_config=xkv_config,
     )
     
     # Run evaluation

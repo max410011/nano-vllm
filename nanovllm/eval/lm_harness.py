@@ -45,6 +45,8 @@ class NanoVLLMHarness(TemplateLM):
         tensor_parallel_size: int = 1,
         enforce_eager: bool = True,
         max_model_len: Optional[int] = None,
+        enable_xkv: bool = False,
+        xkv_config: Optional["xKVConfig"] = None,
         **kwargs,
     ):
         """
@@ -57,6 +59,8 @@ class NanoVLLMHarness(TemplateLM):
             tensor_parallel_size: Number of GPUs for tensor parallelism
             enforce_eager: If True, disable CUDA graphs for flexibility
             max_model_len: Maximum model context length
+            enable_xkv: If True, enable xKV compression
+            xkv_config: Configuration for xKV compression
             **kwargs: Additional arguments (ignored)
         """
         super().__init__()
@@ -71,6 +75,11 @@ class NanoVLLMHarness(TemplateLM):
         }
         if max_model_len is not None:
             model_kwargs["max_model_len"] = max_model_len
+
+        # xKV configuration
+        if enable_xkv:
+            model_kwargs["enable_xkv"] = True
+            model_kwargs["xkv_config"] = xkv_config
 
         self.model = LLM(pretrained, **model_kwargs)
         self.tokenizer = self.model.tokenizer

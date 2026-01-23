@@ -10,6 +10,7 @@ from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+from nanovllm.xkv import xKVCacheManager
 
 
 class ModelRunner:
@@ -31,8 +32,16 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
+
+        # Initialize xKV cache manager if enabled (before warmup)
+        self.xkv_manager = None
+        if config.enable_xkv and config.xkv_config is not None:
+            num_kv_heads = hf_config.num_key_value_heads // self.world_size
+            self.xkv_manager = xKVCacheManager(config.xkv_config, num_kv_heads)
+
         self.warmup_model()
         self.allocate_kv_cache()
+
         if not self.enforce_eager:
             self.capture_cudagraph()
         torch.set_default_device("cpu")
@@ -189,7 +198,9 @@ class ModelRunner:
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            # Pass xkv_manager only during prefill (xKV compression happens during prefill)
+            xkv_mgr = self.xkv_manager if is_prefill else None
+            return self.model.compute_logits(self.model(input_ids, positions, xkv_mgr))
         else:
             bs = input_ids.size(0)
             context = get_context()
@@ -211,6 +222,11 @@ class ModelRunner:
         logits = self.run_model(input_ids, positions, is_prefill)
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
+
+        # Clear xKV cache after prefill (compression data no longer needed)
+        if is_prefill and self.xkv_manager is not None:
+            self.xkv_manager.clear_all()
+
         return token_ids
 
     @torch.inference_mode()
