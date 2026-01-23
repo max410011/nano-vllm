@@ -3,6 +3,8 @@ from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
+import torch
+import torch.nn.functional as F
 import torch.multiprocessing as mp
 
 from nanovllm.config import Config
@@ -91,3 +93,63 @@ class LLMEngine:
         if use_tqdm:
             pbar.close()
         return outputs
+
+    @torch.inference_mode()
+    def compute_prompt_logprobs(self, token_ids: list[int]) -> torch.Tensor:
+        """
+        Compute log probabilities for all tokens in the prompt.
+
+        This method is used by lm-evaluation-harness to compute perplexity
+        and likelihood-based metrics.
+
+        Args:
+            token_ids: List of token IDs for the prompt
+
+        Returns:
+            Tensor of shape [seq_len, vocab_size] containing log probabilities
+        """
+        from nanovllm.utils.context import set_context, reset_context
+
+        # Create input tensors
+        seq_len = len(token_ids)
+        input_ids = torch.tensor(token_ids, dtype=torch.int64, device="cuda")
+        positions = torch.arange(seq_len, dtype=torch.int64, device="cuda")
+
+        # Set up context for prefill
+        # Use slot_mapping with -1 values to skip KV cache storage
+        # (store_kvcache_kernel skips slots with -1)
+        cu_seqlens_q = torch.tensor([0, seq_len], dtype=torch.int32, device="cuda")
+        cu_seqlens_k = torch.tensor([0, seq_len], dtype=torch.int32, device="cuda")
+        slot_mapping = torch.full((seq_len,), -1, dtype=torch.int32, device="cuda")
+
+        set_context(
+            is_prefill=True,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=seq_len,
+            max_seqlen_k=seq_len,
+            slot_mapping=slot_mapping,
+            context_lens=None,
+            block_tables=None,
+        )
+
+        try:
+            # Forward pass to get hidden states
+            model = self.model_runner.model
+            hidden_states = model(input_ids, positions)
+            # Get logits for ALL tokens (bypass the last-token-only logic in lm_head)
+            # lm_head.forward normally extracts only last token for generation,
+            # but we need all tokens for perplexity computation
+            logits = F.linear(hidden_states, model.lm_head.weight)
+            # Handle tensor parallelism if needed
+            if model.lm_head.tp_size > 1:
+                import torch.distributed as dist
+                all_logits = [torch.empty_like(logits) for _ in range(model.lm_head.tp_size)] \
+                    if model.lm_head.tp_rank == 0 else None
+                dist.gather(logits, all_logits, 0)
+                logits = torch.cat(all_logits, -1) if model.lm_head.tp_rank == 0 else None
+            # Convert to log probabilities
+            log_probs = F.log_softmax(logits.float(), dim=-1)
+            return log_probs
+        finally:
+            reset_context()
