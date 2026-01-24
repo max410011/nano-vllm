@@ -11,6 +11,7 @@
 | 2 | 整合 xKV (基礎版) | 用 lm_eval RULER 測試壓縮後 PPL |
 | 3 | 整合 xKV + Paged Attention | 用 lm_eval RULER 測試 PPL |
 | 4 | 整合 xKV-sparse | 用 lm_eval 測試 PPL |
+| 5 | 整合 SCBench | 用 MInference submodule 測試 multi-turn long-context |
 
 ---
 
@@ -293,6 +294,89 @@ def test_memory_reduction():
 - [ ] PPL 增加 < 10% (對於 50% sparsity)
 - [ ] 記憶體節省符合預期
 - [ ] 支援與 CUDA Graph 配合使用
+
+---
+
+## Step 5: 整合 SCBench (MInference Submodule)
+
+### 5.1 目標
+- 使用 git submodule 整合 MInference 的 SCBench
+- 測試 multi-turn long-context 場景下的 KV cache 重用效率
+- 支援 SCDQ (Same-Context-Different-Query) 模式
+
+### 5.2 需要創建的檔案
+```
+nanovllm/
+├── eval/
+│   └── scbench.py       # SCBench wrapper using MInference
+scripts/
+└── run_scbench.py       # CLI script
+tests/
+└── test_step5_scbench.py
+third_party/
+└── MInference/          # Git submodule
+```
+
+### 5.3 實現細節
+
+#### 5.3.1 Git Submodule 設置
+```bash
+git submodule add https://github.com/microsoft/MInference third_party/MInference
+```
+
+#### 5.3.2 SCBench Wrapper
+```python
+# nanovllm/eval/scbench.py
+class NanoVLLMSCBench:
+    """Wrapper for MInference's SCBench with nano-vllm."""
+
+    def test_scdq(self, example, max_length):
+        """SCDQ mode: context encoded once, reused for queries."""
+
+    def test(self, example, max_length):
+        """Multi-turn mode: each turn builds on previous."""
+
+    def evaluate(self, task_name, output_dir, limit):
+        """Run full evaluation on a task."""
+```
+
+#### 5.3.3 Lazy Module Loading
+```python
+def _get_scbench_modules():
+    """Import MInference modules without minference dependency."""
+    # Uses importlib to avoid args.py's minference import
+```
+
+### 5.4 支援的任務
+| Task | Scoring |
+|------|---------|
+| scbench_kv | contains match |
+| scbench_passkey | exact match |
+| scbench_qa_eng | F1 score |
+| scbench_qa_chn | F1 score (Chinese) |
+| scbench_choice_eng | letter match |
+| scbench_mf | math find |
+| scbench_repoqa | code match |
+| scbench_summary | ROUGE-L |
+| scbench_vt | string match |
+| scbench_many_shot | contains |
+
+### 5.5 測試
+```python
+# tests/test_step5_scbench.py (12 tests)
+def test_minference_path_exists()
+def test_scbench_modules_loadable()
+def test_scbench_config_defaults()
+def test_tasks_match_minference()
+```
+
+### 5.6 驗收標準
+- [x] MInference submodule 正確添加
+- [x] SCBench modules 可正常 import
+- [x] 12 個測試通過
+- [x] 支援 SCDQ 和 multi-turn 模式
+- [x] 與 xKV 壓縮相容
+- [x] 無 minference package 依賴
 
 ---
 

@@ -1,0 +1,3 @@
+[submodule "third_party/MInference"]
+	path = third_party/MInference
+	url = https://github.com/microsoft/MInference
