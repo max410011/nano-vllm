@@ -71,6 +71,9 @@ class xKVConfig:
 
     # Sparse attention settings (for Step 4 - ShadowKV-style)
     enable_sparse: bool = False
+    sparse_mode: str = "xkv_sr"  # "xk_sr" or "xkv_sr"
+    # xK-SR: K uses SVD, V is offloaded (original ShadowKV style)
+    # xKV-SR: Both K and V use SVD compression + sparse
     chunk_size: int = 8  # Tokens per chunk
     sparse_budget: int = 256  # Number of chunks to select
     num_outliers: int = 48  # Number of outlier chunks to keep
@@ -83,6 +86,12 @@ class xKVConfig:
             raise ValueError(
                 f"Invalid layer_merge_impl '{self.layer_merge_impl}'. "
                 "Must be 'svd' or 'slerp'."
+            )
+
+        if self.enable_sparse and self.sparse_mode not in ("xk_sr", "xkv_sr"):
+            raise ValueError(
+                f"Invalid sparse_mode '{self.sparse_mode}'. "
+                "Must be 'xk_sr' or 'xkv_sr'."
             )
 
         # Finalize each group's parameters
@@ -152,11 +161,18 @@ def generate_consecutive_xKV_config(
     paged_writeback: bool = False,
     # Sparse attention parameters (Step 4)
     enable_sparse: bool = False,
+    sparse_mode: str = "xkv_sr",  # "xk_sr" or "xkv_sr"
     chunk_size: int = 8,
     sparse_budget: int = 256,
     num_outliers: int = 48,
 ) -> xKVConfig:
-    """Quickly build a xKVConfig with consecutive-layer groups."""
+    """
+    Quickly build a xKVConfig with consecutive-layer groups.
+
+    Sparse modes:
+    - xk_sr: K uses SVD compression, V is offloaded (original ShadowKV style)
+    - xkv_sr: Both K and V use SVD compression + sparse selection
+    """
     if end_layer == -1:
         assert num_layers is not None, "Must provide num_layers if end_layer is -1"
         end_layer = num_layers - 1
@@ -175,6 +191,7 @@ def generate_consecutive_xKV_config(
         layer_groups=layer_groups,
         paged_writeback=paged_writeback,
         enable_sparse=enable_sparse,
+        sparse_mode=sparse_mode,
         chunk_size=chunk_size,
         sparse_budget=sparse_budget,
         num_outliers=num_outliers,

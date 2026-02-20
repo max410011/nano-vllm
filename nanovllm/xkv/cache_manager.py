@@ -66,6 +66,7 @@ class xKVCacheManager:
                         chunk_size=config.chunk_size,
                         sparse_budget=config.sparse_budget,
                         num_outliers=config.num_outliers,
+                        sparse_mode=config.sparse_mode,
                     )
 
     @property
@@ -159,7 +160,12 @@ class xKVCacheManager:
         values: List[Tensor],
         group: LayerGroup,
     ) -> Tuple[List[Tensor], List[Tensor]]:
-        """Apply SVD compression to grouped KV cache."""
+        """
+        Apply SVD compression to grouped KV cache.
+
+        For xk_sr mode: Only compress K, V is handled by SparseSelector (offloaded)
+        For xkv_sr mode: Compress both K and V
+        """
         # Reshape from (N, num_heads, head_dim) to (1, num_heads, N, head_dim) for SVD
         keys_4d = [k.unsqueeze(0).transpose(1, 2) for k in keys]
         values_4d = [v.unsqueeze(0).transpose(1, 2) for v in values]
@@ -170,20 +176,28 @@ class xKVCacheManager:
 
         split_sizes = [self.num_kv_heads for _ in keys]
 
-        # Apply SVD compression
+        # Apply SVD compression to K
         if self.config.merge_key and group.rank_k is not None:
             combined_key = fake_svd(combined_key.float(), rank=group.rank_k).to(combined_key.dtype)
 
-        if self.config.merge_value and group.rank_v is not None:
+        # Apply SVD compression to V (only for xkv_sr mode, not xk_sr)
+        # In xk_sr mode, V is offloaded to CPU and handled by SparseSelector
+        should_compress_v = (
+            self.config.merge_value
+            and group.rank_v is not None
+            and not (self.config.enable_sparse and self.config.sparse_mode == "xk_sr")
+        )
+        if should_compress_v:
             combined_value = fake_svd(combined_value.float(), rank=group.rank_v).to(combined_value.dtype)
 
         # Split back to per-layer tensors
         key_layers_4d = torch.split(combined_key, split_sizes, dim=1)
         value_layers_4d = torch.split(combined_value, split_sizes, dim=1)
 
-        # Reshape back to (N, num_heads, head_dim)
-        compressed_keys = [k.squeeze(0).transpose(0, 1) for k in key_layers_4d]
-        compressed_values = [v.squeeze(0).transpose(0, 1) for v in value_layers_4d]
+        # Reshape back to (N, num_heads, head_dim) and ensure contiguous memory layout
+        # The .contiguous() is critical for paged cache writeback which checks stride
+        compressed_keys = [k.squeeze(0).transpose(0, 1).contiguous() for k in key_layers_4d]
+        compressed_values = [v.squeeze(0).transpose(0, 1).contiguous() for v in value_layers_4d]
 
         return compressed_keys, compressed_values
 

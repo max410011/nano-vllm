@@ -45,6 +45,7 @@ class NanoVLLMHarness(TemplateLM):
         tensor_parallel_size: int = 1,
         enforce_eager: bool = True,
         max_model_len: Optional[int] = None,
+        max_num_batched_tokens: Optional[int] = None,
         enable_xkv: bool = False,
         xkv_config: Optional["xKVConfig"] = None,
         **kwargs,
@@ -58,6 +59,7 @@ class NanoVLLMHarness(TemplateLM):
             batch_size: Batch size for evaluation (currently single-threaded)
             tensor_parallel_size: Number of GPUs for tensor parallelism
             enforce_eager: If True, disable CUDA graphs for flexibility
+            max_num_batched_tokens: Maximum batched tokens (must be >= max_model_len)
             max_model_len: Maximum model context length
             enable_xkv: If True, enable xKV compression
             xkv_config: Configuration for xKV compression
@@ -75,6 +77,11 @@ class NanoVLLMHarness(TemplateLM):
         }
         if max_model_len is not None:
             model_kwargs["max_model_len"] = max_model_len
+            # Auto-set max_num_batched_tokens if not provided
+            if max_num_batched_tokens is None:
+                max_num_batched_tokens = max_model_len
+        if max_num_batched_tokens is not None:
+            model_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
 
         # xKV configuration
         if enable_xkv:

@@ -1,4 +1,6 @@
 import pickle
+import random
+import socket
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -13,6 +15,14 @@ from nanovllm.utils.loader import load_model
 from nanovllm.xkv import xKVCacheManager
 
 
+def find_free_port():
+    """Find a free port on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+
+
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
@@ -24,7 +34,9 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        # Use a random free port to avoid conflicts
+        port = find_free_port()
+        dist.init_process_group("nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)

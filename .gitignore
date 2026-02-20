@@ -198,3 +198,5 @@ cython_debug/
 # Customized files
 xKV/
 backup/
+results/
+reports/
